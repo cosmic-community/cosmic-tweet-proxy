@@ -5,15 +5,25 @@ import crypto from 'crypto'
 // Types
 // ---------------------------------------------------------------------------
 
-interface TweetRequestBody {
+interface TweetPayload {
   text: string
+  media_ids?: string[]
   reply_to_tweet_id?: string
+}
+
+interface TweetRequestBody {
+  text?: string
+  media_ids?: string[]
+  reply_to_tweet_id?: string
+  // Thread support: array of tweet payloads. First item is the root tweet.
+  thread?: TweetPayload[]
 }
 
 interface TweetSuccessResponse {
   success: true
   tweet_id: string
   tweet_url: string
+  thread?: Array<{ tweet_id: string; tweet_url: string }>
 }
 
 interface TweetErrorResponse {
@@ -50,7 +60,7 @@ function generateNonce(): string {
 function buildOAuthHeader(
   method: string,
   url: string,
-  bodyParams: Record<string, string>
+  bodyParams: Record<string, string> = {}
 ): string {
   const consumerKey = process.env.X_CONSUMER_KEY as string
   const consumerSecret = process.env.X_CONSUMER_SECRET as string
@@ -105,13 +115,63 @@ function buildOAuthHeader(
 }
 
 // ---------------------------------------------------------------------------
+// Post a single tweet (internal helper)
+// ---------------------------------------------------------------------------
+
+async function postSingleTweet(
+  text: string,
+  mediaIds?: string[],
+  replyToTweetId?: string
+): Promise<{ tweet_id: string; tweet_url: string }> {
+  const twitterUrl = 'https://api.twitter.com/2/tweets'
+
+  const twitterPayload: Record<string, unknown> = {
+    text: text.trim(),
+  }
+
+  if (mediaIds && mediaIds.length > 0) {
+    twitterPayload['media'] = { media_ids: mediaIds }
+  }
+
+  if (replyToTweetId) {
+    twitterPayload['reply'] = { in_reply_to_tweet_id: replyToTweetId }
+  }
+
+  const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
+
+  const twitterResponse = await fetch(twitterUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: oauthHeader,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(twitterPayload),
+  })
+
+  const twitterData = (await twitterResponse.json()) as TwitterApiTweetResponse
+
+  if (!twitterResponse.ok || !twitterData.data?.id) {
+    const errorMessage =
+      twitterData.errors?.[0]?.message ??
+      twitterData.detail ??
+      twitterData.title ??
+      `Twitter API error: HTTP ${twitterResponse.status}`
+    console.error('Twitter API error:', errorMessage, twitterData)
+    throw new Error(errorMessage)
+  }
+
+  const tweetId = twitterData.data.id
+  return {
+    tweet_id: tweetId,
+    tweet_url: `https://x.com/i/web/status/${tweetId}`,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Route handler
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse<TweetResponse>> {
-  // AUTH CHECK TEMPORARILY DISABLED FOR DEBUGGING
-  // TODO: Re-enable after confirming OAuth signing works
-
   // Validate required environment variables
   const requiredEnvVars = [
     'X_CONSUMER_KEY',
@@ -140,78 +200,76 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
     )
   }
 
-  if (!body.text || typeof body.text !== 'string' || body.text.trim() === '') {
-    return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: 'Missing required field: text' },
-      { status: 400 }
-    )
-  }
-
-  // Build the Twitter API request payload
-  const twitterUrl = 'https://api.twitter.com/2/tweets'
-
-  const twitterPayload: Record<string, unknown> = {
-    text: body.text.trim(),
-  }
-
-  if (body.reply_to_tweet_id && typeof body.reply_to_tweet_id === 'string') {
-    twitterPayload['reply'] = {
-      in_reply_to_tweet_id: body.reply_to_tweet_id,
-    }
-  }
-
-  const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
-
-  // Post the tweet to Twitter
-  let twitterResponse: Response
   try {
-    twitterResponse = await fetch(twitterUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: oauthHeader,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(twitterPayload),
+    // -----------------------------------------------------------------------
+    // THREAD MODE: array of tweets posted sequentially, each replying to prev
+    // -----------------------------------------------------------------------
+    if (body.thread && Array.isArray(body.thread) && body.thread.length > 0) {
+      if (body.thread.length > 25) {
+        return NextResponse.json<TweetErrorResponse>(
+          { success: false, error: 'Thread too long: maximum 25 tweets per thread' },
+          { status: 400 }
+        )
+      }
+
+      const threadResults: Array<{ tweet_id: string; tweet_url: string }> = []
+      let previousTweetId: string | undefined = undefined
+
+      for (const tweet of body.thread) {
+        if (!tweet.text || tweet.text.trim() === '') {
+          return NextResponse.json<TweetErrorResponse>(
+            { success: false, error: 'Each thread tweet must have non-empty text' },
+            { status: 400 }
+          )
+        }
+
+        const result = await postSingleTweet(
+          tweet.text,
+          tweet.media_ids,
+          previousTweetId
+        )
+        threadResults.push(result)
+        previousTweetId = result.tweet_id
+
+        // Small delay between thread tweets to avoid rate limiting
+        if (body.thread.indexOf(tweet) < body.thread.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000))
+        }
+      }
+
+      return NextResponse.json<TweetSuccessResponse>({
+        success: true,
+        tweet_id: threadResults[0]!.tweet_id,
+        tweet_url: threadResults[0]!.tweet_url,
+        thread: threadResults,
+      })
+    }
+
+    // -----------------------------------------------------------------------
+    // SINGLE TWEET MODE
+    // -----------------------------------------------------------------------
+    if (!body.text || typeof body.text !== 'string' || body.text.trim() === '') {
+      return NextResponse.json<TweetErrorResponse>(
+        { success: false, error: 'Missing required field: text (or provide a thread array)' },
+        { status: 400 }
+      )
+    }
+
+    const result = await postSingleTweet(
+      body.text,
+      body.media_ids,
+      body.reply_to_tweet_id
+    )
+
+    return NextResponse.json<TweetSuccessResponse>({
+      success: true,
+      ...result,
     })
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Network error'
-    console.error('Failed to reach Twitter API:', message)
+    const message = err instanceof Error ? err.message : 'Unknown error'
     return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: `Failed to reach Twitter API: ${message}` },
+      { success: false, error: message },
       { status: 502 }
     )
   }
-
-  // Parse the Twitter API response
-  let twitterData: TwitterApiTweetResponse
-  try {
-    twitterData = (await twitterResponse.json()) as TwitterApiTweetResponse
-  } catch {
-    return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: 'Failed to parse Twitter API response' },
-      { status: 502 }
-    )
-  }
-
-  if (!twitterResponse.ok || !twitterData.data?.id) {
-    const errorMessage =
-      twitterData.errors?.[0]?.message ??
-      twitterData.detail ??
-      twitterData.title ??
-      `Twitter API error: HTTP ${twitterResponse.status}`
-
-    console.error('Twitter API error:', errorMessage, twitterData)
-    return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: errorMessage },
-      { status: twitterResponse.status >= 400 ? twitterResponse.status : 502 }
-    )
-  }
-
-  // Return success
-  const tweetId = twitterData.data.id
-  return NextResponse.json<TweetSuccessResponse>({
-    success: true,
-    tweet_id: tweetId,
-    tweet_url: `https://x.com/i/web/status/${tweetId}`,
-  })
 }
