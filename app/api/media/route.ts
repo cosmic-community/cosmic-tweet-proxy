@@ -146,7 +146,8 @@ async function mediaAppend(
   form.append('command', 'APPEND')
   form.append('media_id', mediaId)
   form.append('segment_index', segmentIndex.toString())
-  form.append('media', new Blob([chunk]))
+  // Convert Buffer to Uint8Array for Blob compatibility across TS/Node versions
+  form.append('media', new Blob([new Uint8Array(chunk)]))
 
   const response = await fetch(MEDIA_UPLOAD_URL, {
     method: 'POST',
@@ -341,6 +342,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<MediaResp
       { status: 400 }
     )
   }
+
+  // suppress unused variable warning
+  void fileName
 
   try {
     // INIT
