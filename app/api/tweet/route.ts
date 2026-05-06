@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
+import { TwitterApi } from 'twitter-api-v2'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,150 +33,54 @@ interface TweetErrorResponse {
 
 type TweetResponse = TweetSuccessResponse | TweetErrorResponse
 
-interface TwitterApiTweetResponse {
-  data?: {
-    id: string
-    text: string
-  }
-  errors?: Array<{ message: string; code?: number }>
-  detail?: string
-  title?: string
-  status?: number
-  type?: string
-}
-
 // ---------------------------------------------------------------------------
-// OAuth 1.0a helpers
+// Get Twitter client (OAuth 1.0a User Context via twitter-api-v2)
 // ---------------------------------------------------------------------------
 
-function percentEncode(str: string): string {
-  return encodeURIComponent(str)
-    .replace(/!/g, '%21')
-    .replace(/'/g, '%27')
-    .replace(/\(/g, '%28')
-    .replace(/\)/g, '%29')
-    .replace(/\*/g, '%2A')
-}
-
-function buildOAuthHeader(
-  method: string,
-  url: string,
-  bodyParams: Record<string, string> = {}
-): string {
-  const consumerKey = process.env.X_CONSUMER_KEY ?? ''
-  const consumerSecret = process.env.X_CONSUMER_SECRET ?? ''
+function getTwitterClient(): TwitterApi {
+  const appKey = process.env.X_CONSUMER_KEY ?? ''
+  const appSecret = process.env.X_CONSUMER_SECRET ?? ''
   const accessToken = process.env.X_ACCESS_TOKEN ?? ''
-  const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET ?? ''
+  const accessSecret = process.env.X_ACCESS_TOKEN_SECRET ?? ''
 
-  const oauthNonce = crypto.randomBytes(16).toString('hex')
-  const oauthTimestamp = Math.floor(Date.now() / 1000).toString()
+  console.log('[twitter] consumer_key prefix:', appKey.slice(0, 6))
+  console.log('[twitter] access_token prefix:', accessToken.slice(0, 6))
 
-  const oauthParams: Record<string, string> = {
-    oauth_consumer_key: consumerKey,
-    oauth_nonce: oauthNonce,
-    oauth_signature_method: 'HMAC-SHA1',
-    oauth_timestamp: oauthTimestamp,
-    oauth_token: accessToken,
-    oauth_version: '1.0',
-  }
-
-  // Combine oauth params + body params for signature base string
-  const allParams: Record<string, string> = { ...oauthParams, ...bodyParams }
-  const sortedParams = Object.keys(allParams)
-    .sort()
-    .map((k) => `${percentEncode(k)}=${percentEncode(allParams[k] as string)}`)
-    .join('&')
-
-  const signatureBaseString = [
-    method.toUpperCase(),
-    percentEncode(url),
-    percentEncode(sortedParams),
-  ].join('&')
-
-  const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(accessTokenSecret)}`
-
-  const signature = crypto
-    .createHmac('sha1', signingKey)
-    .update(signatureBaseString)
-    .digest('base64')
-
-  oauthParams['oauth_signature'] = signature
-
-  const authHeader =
-    'OAuth ' +
-    Object.keys(oauthParams)
-      .sort()
-      .map((k) => `${percentEncode(k)}="${percentEncode(oauthParams[k] as string)}"`)
-      .join(', ')
-
-  // Debug logging (safe — only logs first 6 chars of sensitive values)
-  console.log('[oauth] consumer_key prefix:', consumerKey.slice(0, 6))
-  console.log('[oauth] access_token prefix:', accessToken.slice(0, 6))
-  console.log('[oauth] nonce:', oauthNonce)
-  console.log('[oauth] timestamp:', oauthTimestamp)
-  console.log('[oauth] signature_base_string:', signatureBaseString)
-  console.log('[oauth] signing_key prefix:', signingKey.slice(0, 10) + '...')
-  console.log('[oauth] signature:', signature)
-
-  return authHeader
+  return new TwitterApi({
+    appKey,
+    appSecret,
+    accessToken,
+    accessSecret,
+  })
 }
 
 // ---------------------------------------------------------------------------
-// Post a single tweet using OAuth 1.0a User Context
+// Post a single tweet
 // ---------------------------------------------------------------------------
 
 async function postSingleTweet(
+  client: TwitterApi,
   text: string,
   mediaIds?: string[],
   replyToTweetId?: string
 ): Promise<{ tweet_id: string; tweet_url: string }> {
-  const twitterUrl = 'https://api.twitter.com/2/tweets'
-
-  const twitterPayload: Record<string, unknown> = {
-    text: text.trim(),
-  }
+  const payload: Parameters<typeof client.v2.tweet>[0] = { text: text.trim() }
 
   if (mediaIds && mediaIds.length > 0) {
-    twitterPayload['media'] = { media_ids: mediaIds }
+    payload.media = { media_ids: mediaIds as [string, ...string[]] }
   }
 
   if (replyToTweetId) {
-    twitterPayload['reply'] = { in_reply_to_tweet_id: replyToTweetId }
+    payload.reply = { in_reply_to_tweet_id: replyToTweetId }
   }
 
-  // OAuth 1.0a does NOT include JSON body params in signature
-  const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
+  console.log('[tweet] Posting tweet:', JSON.stringify(payload))
 
-  console.log('[tweet] Posting to Twitter API v2 with OAuth 1.0a')
-  console.log('[tweet] Payload:', JSON.stringify(twitterPayload))
+  const response = await client.v2.tweet(payload)
 
-  const twitterResponse = await fetch(twitterUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: oauthHeader,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(twitterPayload),
-  })
+  console.log('[tweet] Response:', JSON.stringify(response))
 
-  const twitterData = (await twitterResponse.json()) as TwitterApiTweetResponse
-
-  console.log('[tweet] Twitter API status:', twitterResponse.status)
-  console.log('[tweet] Twitter API response:', JSON.stringify(twitterData))
-
-  if (!twitterResponse.ok || !twitterData.data?.id) {
-    const errorMessage =
-      twitterData.errors?.[0]?.message ??
-      twitterData.detail ??
-      twitterData.title ??
-      `Twitter API error: HTTP ${twitterResponse.status}`
-    console.error('[tweet] Twitter API error:', errorMessage, JSON.stringify(twitterData))
-    const err = new Error(errorMessage) as Error & { twitter_raw?: unknown }
-    err.twitter_raw = twitterData
-    throw err
-  }
-
-  const tweetId = twitterData.data.id
+  const tweetId = response.data.id
   return {
     tweet_id: tweetId,
     tweet_url: `https://x.com/i/web/status/${tweetId}`,
@@ -209,6 +113,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
   }
 
   try {
+    const client = getTwitterClient()
+
     // THREAD MODE
     if (body.thread && Array.isArray(body.thread) && body.thread.length > 0) {
       if (body.thread.length > 25) {
@@ -229,11 +135,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
           )
         }
 
-        const result = await postSingleTweet(
-          tweet.text,
-          tweet.media_ids,
-          previousTweetId
-        )
+        const result = await postSingleTweet(client, tweet.text, tweet.media_ids, previousTweetId)
         threadResults.push(result)
         previousTweetId = result.tweet_id
 
@@ -258,19 +160,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
       )
     }
 
-    const result = await postSingleTweet(
-      body.text,
-      body.media_ids,
-      body.reply_to_tweet_id
-    )
+    const result = await postSingleTweet(client, body.text, body.media_ids, body.reply_to_tweet_id)
 
     return NextResponse.json<TweetSuccessResponse>({
       success: true,
       ...result,
     })
-  } catch (err) {
+  } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error'
-    const raw = (err as Error & { twitter_raw?: unknown }).twitter_raw
+    const raw = (err as { data?: unknown }).data ?? err
+    console.error('[tweet] Error:', message, JSON.stringify(raw))
     return NextResponse.json<TweetErrorResponse>(
       { success: false, error: message, twitter_raw: raw },
       { status: 502 }
