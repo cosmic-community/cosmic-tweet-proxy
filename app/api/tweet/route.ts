@@ -63,10 +63,10 @@ function buildOAuthHeader(
   url: string,
   bodyParams: Record<string, string> = {}
 ): string {
-  const consumerKey = process.env.X_CONSUMER_KEY as string
-  const consumerSecret = process.env.X_CONSUMER_SECRET as string
-  const accessToken = process.env.X_ACCESS_TOKEN as string
-  const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET as string
+  const consumerKey = process.env.X_CONSUMER_KEY ?? ''
+  const consumerSecret = process.env.X_CONSUMER_SECRET ?? ''
+  const accessToken = process.env.X_ACCESS_TOKEN ?? ''
+  const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET ?? ''
 
   const oauthNonce = crypto.randomBytes(16).toString('hex')
   const oauthTimestamp = Math.floor(Date.now() / 1000).toString()
@@ -110,8 +110,8 @@ function buildOAuthHeader(
       .join(', ')
 
   // Debug logging (safe — only logs first 6 chars of sensitive values)
-  console.log('[oauth] consumer_key prefix:', consumerKey?.slice(0, 6))
-  console.log('[oauth] access_token prefix:', accessToken?.slice(0, 6))
+  console.log('[oauth] consumer_key prefix:', consumerKey.slice(0, 6))
+  console.log('[oauth] access_token prefix:', accessToken.slice(0, 6))
   console.log('[oauth] nonce:', oauthNonce)
   console.log('[oauth] timestamp:', oauthTimestamp)
   console.log('[oauth] signature_base_string:', signatureBaseString)
