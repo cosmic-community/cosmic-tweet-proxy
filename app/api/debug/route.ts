@@ -51,7 +51,7 @@ export async function GET() {
 
   const sortedParams = Object.keys(oauthParams)
     .sort()
-    .map((k) => `${percentEncode(k)}=${percentEncode(oauthParams[k])}`)
+    .map((k) => `${percentEncode(k)}=${percentEncode(oauthParams[k] as string)}`)
     .join('&')
 
   const signatureBaseString = [

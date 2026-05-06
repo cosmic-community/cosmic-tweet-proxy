@@ -84,7 +84,7 @@ function buildOAuthHeader(
   const allParams: Record<string, string> = { ...oauthParams, ...bodyParams }
   const sortedParams = Object.keys(allParams)
     .sort()
-    .map((k) => `${percentEncode(k)}=${percentEncode(allParams[k])}`)
+    .map((k) => `${percentEncode(k)}=${percentEncode(allParams[k] as string)}`)
     .join('&')
 
   const signatureBaseString = [
@@ -106,7 +106,7 @@ function buildOAuthHeader(
     'OAuth ' +
     Object.keys(oauthParams)
       .sort()
-      .map((k) => `${percentEncode(k)}="${percentEncode(oauthParams[k])}"`)
+      .map((k) => `${percentEncode(k)}="${percentEncode(oauthParams[k] as string)}"`)
       .join(', ')
 
   // Debug logging (safe — only logs first 6 chars of sensitive values)
