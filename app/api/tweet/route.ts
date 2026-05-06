@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import crypto from 'crypto'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,7 +46,83 @@ interface TwitterApiTweetResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Post a single tweet using OAuth 2.0 user context (Bearer Token)
+// OAuth 1.0a helpers
+// ---------------------------------------------------------------------------
+
+function percentEncode(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A')
+}
+
+function buildOAuthHeader(
+  method: string,
+  url: string,
+  bodyParams: Record<string, string> = {}
+): string {
+  const consumerKey = process.env.X_CONSUMER_KEY as string
+  const consumerSecret = process.env.X_CONSUMER_SECRET as string
+  const accessToken = process.env.X_ACCESS_TOKEN as string
+  const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET as string
+
+  const oauthNonce = crypto.randomBytes(16).toString('hex')
+  const oauthTimestamp = Math.floor(Date.now() / 1000).toString()
+
+  const oauthParams: Record<string, string> = {
+    oauth_consumer_key: consumerKey,
+    oauth_nonce: oauthNonce,
+    oauth_signature_method: 'HMAC-SHA1',
+    oauth_timestamp: oauthTimestamp,
+    oauth_token: accessToken,
+    oauth_version: '1.0',
+  }
+
+  // Combine oauth params + body params for signature base string
+  const allParams: Record<string, string> = { ...oauthParams, ...bodyParams }
+  const sortedParams = Object.keys(allParams)
+    .sort()
+    .map((k) => `${percentEncode(k)}=${percentEncode(allParams[k])}`)
+    .join('&')
+
+  const signatureBaseString = [
+    method.toUpperCase(),
+    percentEncode(url),
+    percentEncode(sortedParams),
+  ].join('&')
+
+  const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(accessTokenSecret)}`
+
+  const signature = crypto
+    .createHmac('sha1', signingKey)
+    .update(signatureBaseString)
+    .digest('base64')
+
+  oauthParams['oauth_signature'] = signature
+
+  const authHeader =
+    'OAuth ' +
+    Object.keys(oauthParams)
+      .sort()
+      .map((k) => `${percentEncode(k)}="${percentEncode(oauthParams[k])}"`)
+      .join(', ')
+
+  // Debug logging (safe — only logs first 6 chars of sensitive values)
+  console.log('[oauth] consumer_key prefix:', consumerKey?.slice(0, 6))
+  console.log('[oauth] access_token prefix:', accessToken?.slice(0, 6))
+  console.log('[oauth] nonce:', oauthNonce)
+  console.log('[oauth] timestamp:', oauthTimestamp)
+  console.log('[oauth] signature_base_string:', signatureBaseString)
+  console.log('[oauth] signing_key prefix:', signingKey.slice(0, 10) + '...')
+  console.log('[oauth] signature:', signature)
+
+  return authHeader
+}
+
+// ---------------------------------------------------------------------------
+// Post a single tweet using OAuth 1.0a User Context
 // ---------------------------------------------------------------------------
 
 async function postSingleTweet(
@@ -54,7 +131,6 @@ async function postSingleTweet(
   replyToTweetId?: string
 ): Promise<{ tweet_id: string; tweet_url: string }> {
   const twitterUrl = 'https://api.twitter.com/2/tweets'
-  const bearerToken = process.env.X_BEARER_TOKEN as string
 
   const twitterPayload: Record<string, unknown> = {
     text: text.trim(),
@@ -68,16 +144,16 @@ async function postSingleTweet(
     twitterPayload['reply'] = { in_reply_to_tweet_id: replyToTweetId }
   }
 
-  console.log('[tweet] Posting to Twitter API v2 with Bearer Token')
-  console.log('[tweet] Env vars present:', {
-    X_BEARER_TOKEN: !!process.env.X_BEARER_TOKEN,
-    X_ACCESS_TOKEN: !!process.env.X_ACCESS_TOKEN,
-  })
+  // OAuth 1.0a does NOT include JSON body params in signature
+  const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
+
+  console.log('[tweet] Posting to Twitter API v2 with OAuth 1.0a')
+  console.log('[tweet] Payload:', JSON.stringify(twitterPayload))
 
   const twitterResponse = await fetch(twitterUrl, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${bearerToken}`,
+      Authorization: oauthHeader,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(twitterPayload),
@@ -112,10 +188,12 @@ async function postSingleTweet(
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse<TweetResponse>> {
-  if (!process.env.X_BEARER_TOKEN) {
-    console.error('[tweet] Missing X_BEARER_TOKEN')
+  const requiredEnvVars = ['X_CONSUMER_KEY', 'X_CONSUMER_SECRET', 'X_ACCESS_TOKEN', 'X_ACCESS_TOKEN_SECRET']
+  const missingVars = requiredEnvVars.filter((v) => !process.env[v])
+  if (missingVars.length > 0) {
+    console.error('[tweet] Missing env vars:', missingVars)
     return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: 'Server misconfiguration: X_BEARER_TOKEN not set' },
+      { success: false, error: `Server misconfiguration: missing ${missingVars.join(', ')}` },
       { status: 500 }
     )
   }
