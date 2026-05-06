@@ -29,6 +29,7 @@ interface TweetSuccessResponse {
 interface TweetErrorResponse {
   success: false
   error: string
+  twitter_raw?: unknown
 }
 
 type TweetResponse = TweetSuccessResponse | TweetErrorResponse
@@ -38,9 +39,11 @@ interface TwitterApiTweetResponse {
     id: string
     text: string
   }
-  errors?: Array<{ message: string }>
+  errors?: Array<{ message: string; code?: number }>
   detail?: string
   title?: string
+  status?: number
+  type?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +142,14 @@ async function postSingleTweet(
 
   const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
 
+  console.log('[tweet] Posting to Twitter API')
+  console.log('[tweet] Env vars present:', {
+    X_CONSUMER_KEY: !!process.env.X_CONSUMER_KEY,
+    X_CONSUMER_SECRET: !!process.env.X_CONSUMER_SECRET,
+    X_ACCESS_TOKEN: !!process.env.X_ACCESS_TOKEN,
+    X_ACCESS_TOKEN_SECRET: !!process.env.X_ACCESS_TOKEN_SECRET,
+  })
+
   const twitterResponse = await fetch(twitterUrl, {
     method: 'POST',
     headers: {
@@ -150,14 +161,19 @@ async function postSingleTweet(
 
   const twitterData = (await twitterResponse.json()) as TwitterApiTweetResponse
 
+  console.log('[tweet] Twitter API status:', twitterResponse.status)
+  console.log('[tweet] Twitter API response:', JSON.stringify(twitterData))
+
   if (!twitterResponse.ok || !twitterData.data?.id) {
     const errorMessage =
       twitterData.errors?.[0]?.message ??
       twitterData.detail ??
       twitterData.title ??
       `Twitter API error: HTTP ${twitterResponse.status}`
-    console.error('Twitter API error:', errorMessage, twitterData)
-    throw new Error(errorMessage)
+    console.error('[tweet] Twitter API error:', errorMessage, JSON.stringify(twitterData))
+    const err = new Error(errorMessage) as Error & { twitter_raw?: unknown }
+    err.twitter_raw = twitterData
+    throw err
   }
 
   const tweetId = twitterData.data.id
@@ -181,7 +197,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
   ]
   for (const envVar of requiredEnvVars) {
     if (!process.env[envVar]) {
-      console.error(`Missing required environment variable: ${envVar}`)
+      console.error(`[tweet] Missing required environment variable: ${envVar}`)
       return NextResponse.json<TweetErrorResponse>(
         { success: false, error: `Server misconfiguration: ${envVar} not set` },
         { status: 500 }
@@ -267,8 +283,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'
+    const raw = (err as Error & { twitter_raw?: unknown }).twitter_raw
     return NextResponse.json<TweetErrorResponse>(
-      { success: false, error: message },
+      { success: false, error: message, twitter_raw: raw },
       { status: 502 }
     )
   }
