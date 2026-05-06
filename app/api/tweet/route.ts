@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -15,7 +14,6 @@ interface TweetRequestBody {
   text?: string
   media_ids?: string[]
   reply_to_tweet_id?: string
-  // Thread support: array of tweet payloads. First item is the root tweet.
   thread?: TweetPayload[]
 }
 
@@ -47,78 +45,7 @@ interface TwitterApiTweetResponse {
 }
 
 // ---------------------------------------------------------------------------
-// OAuth 1.0a helpers
-// ---------------------------------------------------------------------------
-
-function percentEncode(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => {
-    return '%' + c.charCodeAt(0).toString(16).toUpperCase()
-  })
-}
-
-function generateNonce(): string {
-  return crypto.randomBytes(32).toString('base64').replace(/[^a-zA-Z0-9]/g, '')
-}
-
-function buildOAuthHeader(
-  method: string,
-  url: string,
-  bodyParams: Record<string, string> = {}
-): string {
-  const consumerKey = process.env.X_CONSUMER_KEY as string
-  const consumerSecret = process.env.X_CONSUMER_SECRET as string
-  const accessToken = process.env.X_ACCESS_TOKEN as string
-  const accessTokenSecret = process.env.X_ACCESS_TOKEN_SECRET as string
-
-  const oauthTimestamp = Math.floor(Date.now() / 1000).toString()
-  const oauthNonce = generateNonce()
-
-  const oauthParams: Record<string, string> = {
-    oauth_consumer_key: consumerKey,
-    oauth_nonce: oauthNonce,
-    oauth_signature_method: 'HMAC-SHA1',
-    oauth_timestamp: oauthTimestamp,
-    oauth_token: accessToken,
-    oauth_version: '1.0',
-  }
-
-  const allParams: Record<string, string> = {
-    ...bodyParams,
-    ...oauthParams,
-  }
-
-  const sortedParams = Object.keys(allParams)
-    .sort()
-    .map((key) => `${percentEncode(key)}=${percentEncode(allParams[key] ?? '')}`)
-    .join('&')
-
-  const signatureBaseString = [
-    method.toUpperCase(),
-    percentEncode(url),
-    percentEncode(sortedParams),
-  ].join('&')
-
-  const signingKey = `${percentEncode(consumerSecret)}&${percentEncode(accessTokenSecret)}`
-
-  const signature = crypto
-    .createHmac('sha1', signingKey)
-    .update(signatureBaseString)
-    .digest('base64')
-
-  oauthParams['oauth_signature'] = signature
-
-  const headerValue =
-    'OAuth ' +
-    Object.keys(oauthParams)
-      .sort()
-      .map((key) => `${percentEncode(key)}="${percentEncode(oauthParams[key] ?? '')}"`)
-      .join(', ')
-
-  return headerValue
-}
-
-// ---------------------------------------------------------------------------
-// Post a single tweet (internal helper)
+// Post a single tweet using OAuth 2.0 user context (Bearer Token)
 // ---------------------------------------------------------------------------
 
 async function postSingleTweet(
@@ -127,6 +54,7 @@ async function postSingleTweet(
   replyToTweetId?: string
 ): Promise<{ tweet_id: string; tweet_url: string }> {
   const twitterUrl = 'https://api.twitter.com/2/tweets'
+  const bearerToken = process.env.X_BEARER_TOKEN as string
 
   const twitterPayload: Record<string, unknown> = {
     text: text.trim(),
@@ -140,20 +68,16 @@ async function postSingleTweet(
     twitterPayload['reply'] = { in_reply_to_tweet_id: replyToTweetId }
   }
 
-  const oauthHeader = buildOAuthHeader('POST', twitterUrl, {})
-
-  console.log('[tweet] Posting to Twitter API')
+  console.log('[tweet] Posting to Twitter API v2 with Bearer Token')
   console.log('[tweet] Env vars present:', {
-    X_CONSUMER_KEY: !!process.env.X_CONSUMER_KEY,
-    X_CONSUMER_SECRET: !!process.env.X_CONSUMER_SECRET,
+    X_BEARER_TOKEN: !!process.env.X_BEARER_TOKEN,
     X_ACCESS_TOKEN: !!process.env.X_ACCESS_TOKEN,
-    X_ACCESS_TOKEN_SECRET: !!process.env.X_ACCESS_TOKEN_SECRET,
   })
 
   const twitterResponse = await fetch(twitterUrl, {
     method: 'POST',
     headers: {
-      Authorization: oauthHeader,
+      Authorization: `Bearer ${bearerToken}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(twitterPayload),
@@ -188,24 +112,14 @@ async function postSingleTweet(
 // ---------------------------------------------------------------------------
 
 export async function POST(request: NextRequest): Promise<NextResponse<TweetResponse>> {
-  // Validate required environment variables
-  const requiredEnvVars = [
-    'X_CONSUMER_KEY',
-    'X_CONSUMER_SECRET',
-    'X_ACCESS_TOKEN',
-    'X_ACCESS_TOKEN_SECRET',
-  ]
-  for (const envVar of requiredEnvVars) {
-    if (!process.env[envVar]) {
-      console.error(`[tweet] Missing required environment variable: ${envVar}`)
-      return NextResponse.json<TweetErrorResponse>(
-        { success: false, error: `Server misconfiguration: ${envVar} not set` },
-        { status: 500 }
-      )
-    }
+  if (!process.env.X_BEARER_TOKEN) {
+    console.error('[tweet] Missing X_BEARER_TOKEN')
+    return NextResponse.json<TweetErrorResponse>(
+      { success: false, error: 'Server misconfiguration: X_BEARER_TOKEN not set' },
+      { status: 500 }
+    )
   }
 
-  // Parse and validate the request body
   let body: TweetRequestBody
   try {
     body = (await request.json()) as TweetRequestBody
@@ -217,9 +131,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
   }
 
   try {
-    // -----------------------------------------------------------------------
-    // THREAD MODE: array of tweets posted sequentially, each replying to prev
-    // -----------------------------------------------------------------------
+    // THREAD MODE
     if (body.thread && Array.isArray(body.thread) && body.thread.length > 0) {
       if (body.thread.length > 25) {
         return NextResponse.json<TweetErrorResponse>(
@@ -247,7 +159,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
         threadResults.push(result)
         previousTweetId = result.tweet_id
 
-        // Small delay between thread tweets to avoid rate limiting
         if (body.thread.indexOf(tweet) < body.thread.length - 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000))
         }
@@ -261,9 +172,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<TweetResp
       })
     }
 
-    // -----------------------------------------------------------------------
     // SINGLE TWEET MODE
-    // -----------------------------------------------------------------------
     if (!body.text || typeof body.text !== 'string' || body.text.trim() === '') {
       return NextResponse.json<TweetErrorResponse>(
         { success: false, error: 'Missing required field: text (or provide a thread array)' },
