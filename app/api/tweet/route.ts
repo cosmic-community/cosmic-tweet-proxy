@@ -67,7 +67,8 @@ async function postSingleTweet(
   const payload: Parameters<typeof client.v2.tweet>[0] = { text: text.trim() }
 
   if (mediaIds && mediaIds.length > 0) {
-    payload.media = { media_ids: mediaIds as [string, ...string[]] }
+    // twitter-api-v2 expects a specific tuple type for media_ids
+    payload.media = { media_ids: mediaIds as unknown as [string] }
   }
 
   if (replyToTweetId) {
